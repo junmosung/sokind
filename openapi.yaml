@@ -1,0 +1,389 @@
+openapi: 3.1.0
+info:
+  title: 1:1 Chat (Event-Sourced)
+  version: 0.1.0
+  description: |
+    1:1 실시간 채팅 + 이벤트 소싱 기반 시점 복원 API.
+
+    핵심 규약:
+      * 모든 도메인 변경은 `events`에 append-only로 기록된다 (단일 진실 공급원).
+      * 순서 SoT는 `server_seq` (BIGSERIAL). `client_ts`는 표시용.
+      * 중복 방지 SoT는 `(session_id, client_event_id)` UNIQUE.
+        - 동일 키로 재전송 시 → `wasInserted=false`, 기존 이벤트 반환 (멱등).
+        - 멱등 hit은 projection 갱신과 WebSocket broadcast도 발생하지 않음.
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: sessions
+    description: 세션 라이프사이클
+  - name: events
+    description: 이벤트 수집/조회
+  - name: timeline
+    description: 시점 기반 상태 복원
+  - name: websocket
+    description: STOMP 실시간 채널 (참고)
+
+paths:
+  /sessions:
+    post:
+      tags: [sessions]
+      summary: 세션 생성
+      responses:
+        '201':
+          description: 생성됨
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+    get:
+      tags: [sessions]
+      summary: 세션 목록
+      parameters:
+        - in: query
+          name: status
+          schema: { $ref: '#/components/schemas/SessionStatus' }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Session' }
+
+  /sessions/{id}:
+    get:
+      tags: [sessions]
+      summary: 세션 단건 조회
+      parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sessions/{id}/participants:
+    get:
+      tags: [sessions]
+      summary: 참여자 목록
+      parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Participant' }
+
+  /sessions/{id}/join:
+    post:
+      tags: [sessions]
+      summary: 세션 참여 (JOIN 이벤트 emit)
+      description: |
+        내부적으로 JOIN 이벤트를 append한다. 같은 userId 재호출은 멱등(projection 변화 없음).
+        1:1 세션이므로 세 번째 다른 userId는 409.
+      parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinRequest' }
+      responses:
+        '204': { description: 처리됨 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 세션 종료됨 또는 정원 초과
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
+  /sessions/{id}/leave:
+    post:
+      tags: [sessions]
+      summary: 세션 나가기 (LEAVE 이벤트 emit)
+      parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeaveRequest' }
+      responses:
+        '204': { description: 처리됨 }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sessions/{id}/end:
+    post:
+      tags: [sessions]
+      summary: 세션 종료 (SESSION_END 이벤트 emit)
+      parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+      responses:
+        '204': { description: 처리됨 (이미 ENDED여도 멱등) }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /sessions/{id}/events:
+    post:
+      tags: [events]
+      summary: 이벤트 수집 (멱등)
+      description: |
+        동일 `(sessionId, clientEventId)` 재전송 시 200 + `wasInserted=false`.
+        SESSION_END 이후의 비-SESSION_END 이벤트는 409.
+      parameters: [ { $ref: '#/components/parameters/SessionId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppendEventRequest' }
+      responses:
+        '200':
+          description: 처리됨 (신규 또는 멱등 hit)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppendEventResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 세션 종료됨
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+    get:
+      tags: [events]
+      summary: 이벤트 히스토리 (디버깅/검증용)
+      parameters:
+        - { $ref: '#/components/parameters/SessionId' }
+        - in: query
+          name: from
+          description: server_seq > from
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: to
+          description: server_seq <= to
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 500 }
+      responses:
+        '200':
+          description: OK (server_seq ASC)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EventView' }
+
+  /sessions/{id}/timeline:
+    get:
+      tags: [timeline]
+      summary: 특정 시점 상태 복원
+      description: |
+        `at` 미지정 시 현재 시각 기준. 응답의 `asOfSeq`를 클라가 보관하면
+        이후 `GET /sessions/{id}/events?from={asOfSeq}`로 incremental sync 가능.
+      parameters:
+        - { $ref: '#/components/parameters/SessionId' }
+        - in: query
+          name: at
+          description: ISO-8601 instant (예 2026-05-20T02:30:00Z)
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Timeline' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /ws:
+    get:
+      tags: [websocket]
+      summary: STOMP over WebSocket 엔드포인트 (참고)
+      description: |
+        STOMP 프로토콜.
+          * 구독: `/topic/sessions/{sessionId}` → 신규 이벤트 broadcast 수신
+          * 발행: `/app/sessions/{sessionId}/events` → 본문은 AppendEventRequest와 동일
+
+        broadcast는 트랜잭션 커밋 후에만 발생. 멱등 hit은 broadcast되지 않음.
+      responses:
+        '101': { description: WebSocket upgrade }
+
+components:
+  parameters:
+    SessionId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: 잘못된 요청
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    NotFound:
+      description: 자원 없음
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+
+  schemas:
+    SessionStatus:
+      type: string
+      enum: [ACTIVE, INTERRUPTED, ENDED]
+
+    Session:
+      type: object
+      required: [id, status, createdAt, lastEventSeq]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        createdAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time, nullable: true }
+        lastEventSeq:
+          type: integer
+          format: int64
+          description: 이 세션에 쓰여진 최대 server_seq. catch-up 워터마크.
+
+    Participant:
+      type: object
+      required: [userId, joinedAt, online, lastSeenSeq]
+      properties:
+        userId: { type: string }
+        joinedAt: { type: string, format: date-time }
+        leftAt: { type: string, format: date-time, nullable: true }
+        online: { type: boolean, description: leftAt is null }
+        lastSeenSeq: { type: integer, format: int64 }
+
+    JoinRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, minLength: 1, maxLength: 64 }
+
+    LeaveRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, minLength: 1, maxLength: 64 }
+
+    ChatEventType:
+      type: string
+      enum:
+        - MESSAGE
+        - MESSAGE_EDIT
+        - MESSAGE_DELETE
+        - JOIN
+        - LEAVE
+        - DISCONNECT
+        - RECONNECT
+        - SESSION_END
+
+    AppendEventRequest:
+      type: object
+      required: [clientEventId, type]
+      properties:
+        clientEventId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 클라가 발급하는 멱등성 키. 동일 세션 내 unique.
+        type: { $ref: '#/components/schemas/ChatEventType' }
+        actorUserId:
+          type: string
+          nullable: true
+          description: MESSAGE*/JOIN/LEAVE 등에 필수. SESSION_END는 선택.
+        clientTs:
+          type: string
+          format: date-time
+          nullable: true
+          description: 누락 시 서버 수신 시각. 순서 판정엔 사용하지 않음(표시용).
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            타입별 형태:
+              * MESSAGE / MESSAGE_EDIT  : { messageId, text }
+              * MESSAGE_DELETE          : { messageId }
+              * JOIN/LEAVE/DISCONNECT/RECONNECT/SESSION_END : {}
+
+    AppendEventResponse:
+      allOf:
+        - $ref: '#/components/schemas/EventView'
+        - type: object
+          required: [wasInserted]
+          properties:
+            wasInserted:
+              type: boolean
+              description: false면 동일 clientEventId로 이미 저장된 멱등 재전송.
+
+    EventView:
+      type: object
+      required: [serverSeq, type, clientEventId, clientTs, serverTs, payload]
+      properties:
+        serverSeq: { type: integer, format: int64, description: 전역 단조 증가, 순서 SoT }
+        sessionId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/ChatEventType' }
+        actorUserId: { type: string, nullable: true }
+        clientEventId: { type: string }
+        clientTs: { type: string, format: date-time }
+        serverTs: { type: string, format: date-time }
+        payload:
+          type: object
+          additionalProperties: true
+
+    MessageStatus:
+      type: string
+      enum: [SENT, EDITED, DELETED]
+
+    ParticipantSnapshot:
+      type: object
+      required: [userId, joinedAt]
+      properties:
+        userId: { type: string }
+        joinedAt: { type: string, format: date-time }
+        leftAt: { type: string, format: date-time, nullable: true }
+
+    MessageSnapshot:
+      type: object
+      required: [messageId, sender, status, createdAt, lastModifiedAt]
+      properties:
+        messageId: { type: string }
+        sender: { type: string }
+        text: { type: string, nullable: true, description: DELETED 상태면 null }
+        status: { $ref: '#/components/schemas/MessageStatus' }
+        createdAt: { type: string, format: date-time }
+        lastModifiedAt: { type: string, format: date-time }
+
+    Timeline:
+      type: object
+      required: [sessionId, status, asOfSeq, asOfTime, participants, messages]
+      properties:
+        sessionId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        asOfSeq:
+          type: integer
+          format: int64
+          description: 복원에 사용된 컷오프 server_seq. 이후 incremental sync 시작점.
+        asOfTime: { type: string, format: date-time }
+        participants:
+          type: array
+          items: { $ref: '#/components/schemas/ParticipantSnapshot' }
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/MessageSnapshot' }
+
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, enum: [bad_request, not_found, conflict] }
+        message: { type: string, nullable: true }
