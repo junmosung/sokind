@@ -109,29 +109,10 @@
 
 ## 검증 방법
 
-### 빠른 검증 (5초)
-```bash
-./gradlew test
-```
-Postgres 컨테이너 자동 기동 → Flyway 적용 → 11개 시나리오 자동 검증.
+자동/수동 모두 [`README.md`](../README.md)의 **"빠른 검증"** 및 **"End-to-End 수동 검증 — 단계별"** 섹션 참조.
 
-### 시나리오 매트릭스
-| 테스트 파일 | 검증 내용 | 테스트 수 |
-|---|---|---|
-| [`ChatIntegrationTest`](../src/test/kotlin/me/victor/demo/it/ChatIntegrationTest.kt) | 세션 라이프사이클, 1:1 정원, ENDED 거절, 멱등성, 순서 결정성, 시점 복원(EDIT/DELETE) | 5 |
-| [`SnapshotIntegrationTest`](../src/test/kotlin/me/victor/demo/it/SnapshotIntegrationTest.kt) | interval 도달 시 자동 생성, snapshot+델타 == 풀 리플레이 결정론 | 2 |
-| [`WebSocketIntegrationTest`](../src/test/kotlin/me/victor/demo/it/WebSocketIntegrationTest.kt) | STOMP 구독 + REST publish 브로드캐스트, 멱등 hit 미전파, serverSeq 단조성 | 3 |
-| `DemoApplicationTests` | 컨텍스트 로드 | 1 |
-| **합계** | | **11** |
-
-### 수동 검증 (선택)
-```bash
-docker compose up -d postgres
-./gradlew bootRun
-# 다른 터미널에서
-curl -X POST http://localhost:8080/sessions
-```
-자세한 curl 시나리오는 [`README.md`](../README.md) "동작 검증" 섹션 참조.
+- 자동: `./gradlew test` 한 줄로 11개 시나리오 (Chat 5 / Snapshot 2 / WebSocket 3 / Context 1) 검증.
+- 수동: docker compose → bootRun → curl로 멱등성·시점 복원까지 단계별 검증.
 
 ---
 
@@ -142,12 +123,3 @@ curl -X POST http://localhost:8080/sessions
 - 운영 배포 자동화 / CI/CD
 - 인증·인가의 완결된 구현 (현재는 본문 `userId` 신뢰, README "가정"에 명시)
 - 완전한 제품 수준 UX / 관리 도구
-
-## 미구현 (의식적 선택)
-
-| 항목 | 사유 |
-|---|---|
-| k6 부하 테스트 | 가산점 영역 — 환경 측정값이 환경 의존이라 큰 가치 없음 |
-| Outbox 워커 | 청사진만 (`design.md §4`) — 외부 publish 대상이 없는 MVP라 over-engineering |
-| 다중 인스턴스 broadcast (Redis/Rabbit relay) | 청사진만 (`design.md §2`) — MVP 단일 인스턴스에선 SimpleBroker로 충분 |
-| 헥사고날 전면 적용 | 청사진만 (`docs/architecture.md`) — 도메인 크기 대비 over-engineering, 부분 적용 전략 문서화 |

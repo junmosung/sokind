@@ -3,9 +3,7 @@
 1:1 실시간 채팅 서비스 + 이벤트 소싱 기반 시점 복원.
 Spring Boot 4 (Kotlin, JDK 24) + PostgreSQL 16 + jOOQ + STOMP over WebSocket.
 
-> **📋 평가자용 한눈에 보기**: [**docs/submission-checklist.md**](docs/submission-checklist.md) — 과제 §6 제출물 체크리스트 항목별 위치/검증 매핑 (필수 6/6 + 가산점 4).
-
-## 제출물 체크리스트 (한눈에)
+## 제출물 체크리스트 (필수 6/6 + 가산점 4)
 
 | # | 항목 | 위치 |
 |---|---|---|
@@ -15,9 +13,9 @@ Spring Boot 4 (Kotlin, JDK 24) + PostgreSQL 16 + jOOQ + STOMP over WebSocket.
 | 4 | 주요 쿼리 + 인덱스 + 병목 | [`docs/queries.md`](docs/queries.md) — 핫패스 3개 |
 | 5 | 설계 (재연결/중복/확장/관측/장애) | [`docs/design.md`](docs/design.md) + [`docs/event-sourcing.md`](docs/event-sourcing.md) |
 | 6 | 이벤트 기반 상태 복원 | [`docs/event-sourcing.md`](docs/event-sourcing.md) + [`TimelineService.kt`](src/main/kotlin/me/victor/demo/domain/timeline/TimelineService.kt) |
-| + | 가산점 4종 (Snapshot 자동화/비동기 Projection/헥사고날 청사진/Testcontainers 11/11) | [`docs/submission-checklist.md`](docs/submission-checklist.md#가산점-항목-4-추가-구현) |
+| + | 가산점 4종 (Snapshot 자동화 / 비동기 Broadcast / 헥사고날 청사진 / Testcontainers 11/11) | [`docs/submission-checklist.md`](docs/submission-checklist.md) |
 
-자세한 점검 결과 + 검증 방법은 [**docs/submission-checklist.md**](docs/submission-checklist.md).
+항목별 상세 매핑·검증 방법은 [**docs/submission-checklist.md**](docs/submission-checklist.md).
 
 ## 한 줄 설계 요약
 **모든 도메인 변경을 `events` 테이블에 append-only로 기록 → 어느 시점이든 그 로그만으로 상태 재구축이 가능하다.**
@@ -28,96 +26,189 @@ Spring Boot 4 (Kotlin, JDK 24) + PostgreSQL 16 + jOOQ + STOMP over WebSocket.
 
 ---
 
-## 실행
-
-### 사전 요구
-- Docker (Postgres 16 컨테이너 기동)
-- JDK 24 (gradle toolchain이 자동으로 받음)
-
-### 1. Postgres 기동 (**필수: jOOQ 코드 생성도 이 DB를 introspect함**)
-```bash
-docker compose up -d postgres
-```
-
-### 2. 앱 기동
-```bash
-./gradlew bootRun
-```
-- 빌드 단계: jOOQ가 라이브 DB의 스키마를 introspect해서 타입 안전한 DSL 코드를 `build/generated-sources/jooq/`에 생성 (커밋하지 않음).
-- 첫 기동: Flyway가 `V1__init.sql`을 실행해 스키마를 만든다.
-- `http://localhost:8080`에서 동작.
-
-### 3. Swagger UI
-```
-http://localhost:8080/swagger.html
-```
-루트의 `openapi.yaml`을 SoT로 두고, 빌드 시 `static/`으로 복사되어 `/openapi.yaml`로 서빙된다.
-
-### 4. 통합 테스트 (`./gradlew test`)
-Testcontainers가 Postgres 컨테이너를 자동 기동 → Flyway 적용 → 시나리오 검증까지 한 번에.
-docker만 실행 중이면 `docker compose up`도 필요 없음.
+## 빠른 검증 — 권장 (5초)
 
 ```bash
 ./gradlew test
 ```
 
-| 테스트 파일 | 검증 내용 | 테스트 수 |
+Testcontainers가 Postgres를 자동 기동 → Flyway 적용 → 11개 시나리오 자동 검증. Docker만 실행 중이면 OK.
+
+| 테스트 | 검증 내용 | 수 |
 |---|---|---|
 | `ChatIntegrationTest` | 세션 라이프사이클, 1:1 정원, ENDED 거절, 멱등성, 순서 결정성, 시점 복원(EDIT/DELETE) | 5 |
 | `SnapshotIntegrationTest` | interval 도달 시 자동 생성, snapshot+델타 == 풀 리플레이 결정론 | 2 |
 | `WebSocketIntegrationTest` | STOMP 구독 + REST publish 브로드캐스트, 멱등 hit 미전파, serverSeq 단조성 | 3 |
 | `DemoApplicationTests` | 컨텍스트 로드 | 1 |
-| **합계** | | **11** |
 
-### 5. (선택) 스키마/데이터 초기화
+---
+
+## End-to-End 수동 검증 — 단계별
+
+### 사전 요구
+- Docker (Postgres 16 컨테이너)
+- JDK 24 (gradle toolchain이 자동으로 설치)
+- `jq` (응답 파싱용)
+
+### Step 1 — Postgres 기동
+```bash
+docker compose up -d postgres
+```
+**확인**:
+```bash
+docker ps --filter name=chat-postgres
+# STATUS에 "Up X seconds (healthy)" 가 보여야 함
+```
+
+### Step 2 — 앱 빌드 + 기동
+```bash
+./gradlew bootRun
+```
+**내부 동작**:
+1. `jooqCodegen` — 라이브 Postgres의 스키마를 introspect해서 타입 안전 DSL 코드를 `build/generated-sources/jooq/`에 생성 (커밋되지 않음).
+2. `compileKotlin` — 코드 컴파일.
+3. Flyway가 `V1__init.sql`을 적용해 4개 테이블 + 7개 인덱스 생성.
+
+**확인** (앱 로그):
+```
+Migrating schema "public" to version "1 - init"
+Started DemoApplicationKt in X seconds
+```
+이후:
+- 앱: http://localhost:8080
+- Swagger UI: http://localhost:8080/swagger.html
+
+### Step 3 — REST 시나리오
+
+새 터미널을 열고 진행. `$BASE`는 앱 주소.
+```bash
+BASE=http://localhost:8080
+```
+
+#### 3-1. 세션 생성
+```bash
+SID=$(curl -sf -X POST $BASE/sessions | jq -r .id)
+echo $SID
+```
+**기대**: `c23d692a-...` 형태의 UUID 1줄.
+
+#### 3-2. 양쪽 참여 (1:1)
+```bash
+curl -sf -X POST $BASE/sessions/$SID/join \
+  -H 'content-type: application/json' -d '{"userId":"alice"}' -w 'HTTP %{http_code}\n'
+curl -sf -X POST $BASE/sessions/$SID/join \
+  -H 'content-type: application/json' -d '{"userId":"bob"}' -w 'HTTP %{http_code}\n'
+```
+**기대**: 각각 `HTTP 204`.
+
+3번째 참여자는 거절되어야 함:
+```bash
+curl -s -X POST $BASE/sessions/$SID/join \
+  -H 'content-type: application/json' -d '{"userId":"carol"}' -w '\nHTTP %{http_code}\n'
+```
+**기대**: `{"error":"conflict","message":"session is full (1:1)"}` + `HTTP 409`.
+
+#### 3-3. 메시지 전송
+```bash
+curl -sf -X POST $BASE/sessions/$SID/events \
+  -H 'content-type: application/json' \
+  -d '{"clientEventId":"cli-1","type":"MESSAGE","actorUserId":"alice","payload":{"messageId":"m1","text":"안녕"}}' \
+  | jq
+```
+**기대**:
+```json
+{
+  "serverSeq": 3,
+  "wasInserted": true,
+  "clientEventId": "cli-1",
+  ...
+}
+```
+> `serverSeq=3`인 이유: JOIN 2건이 seq 1, 2를 차지.
+
+#### 3-4. 멱등성 검증 — 같은 키로 재전송
+```bash
+curl -sf -X POST $BASE/sessions/$SID/events \
+  -H 'content-type: application/json' \
+  -d '{"clientEventId":"cli-1","type":"MESSAGE","actorUserId":"alice","payload":{"messageId":"m1","text":"안녕"}}' \
+  | jq
+```
+**기대**:
+```json
+{
+  "serverSeq": 3,           ← 같은 serverSeq
+  "wasInserted": false,     ← 멱등 hit
+  ...
+}
+```
+> **핵심**: 새 행이 만들어지지 않고 같은 위치 정보가 반환됨. DB에 row가 늘지 않음.
+
+#### 3-5. 시점 복원 (현재)
+```bash
+curl -sf "$BASE/sessions/$SID/timeline" | jq
+```
+**기대**: 참여자 2명(alice, bob) + 메시지 1건(m1, SENT).
+
+#### 3-6. EDIT/DELETE 후 시점 복원 비교
+```bash
+T_MID=$(date -u +%Y-%m-%dT%H:%M:%S.999Z)
+sleep 1
+curl -sf -X POST $BASE/sessions/$SID/events -H 'content-type: application/json' \
+  -d '{"clientEventId":"cli-2","type":"MESSAGE_EDIT","actorUserId":"alice","payload":{"messageId":"m1","text":"안녕 (수정됨)"}}' >/dev/null
+
+# 현재 → status=EDITED, text="안녕 (수정됨)"
+curl -sf "$BASE/sessions/$SID/timeline" | jq '.messages[0]'
+
+# 과거 시점 t_mid → 수정 적용 전 (status=SENT, text="안녕")
+curl -sf "$BASE/sessions/$SID/timeline?at=$T_MID" | jq '.messages[0]'
+```
+**핵심**: 같은 세션을 두 시점으로 보면 다른 상태가 반환됨 → 이벤트 기반 시점 복원이 동작.
+
+#### 3-7. 이벤트 히스토리 (디버깅)
+```bash
+curl -sf "$BASE/sessions/$SID/events?from=0" | jq
+```
+**기대**: server_seq 오름차순 이벤트 목록 (JOIN×2, MESSAGE, MESSAGE_EDIT).
+
+### Step 4 — WebSocket 브로드캐스트 (선택)
+
+`./gradlew test`의 `WebSocketIntegrationTest`가 이미 자동 검증하지만, 수동으로 확인하려면:
+
+```bash
+cd /tmp && mkdir -p ws-check && cd ws-check
+npm init -y >/dev/null && npm install @stomp/stompjs ws sockjs-client >/dev/null
+```
+
+`check.mjs` 작성 (대략):
+```javascript
+import { Client } from '@stomp/stompjs';
+import WebSocket from 'ws';
+
+const SID = '여기에 Step 3-1에서 만든 sessionId';
+const client = new Client({
+  webSocketFactory: () => new WebSocket('ws://localhost:8080/ws'),
+  onConnect: () => {
+    client.subscribe(`/topic/sessions/${SID}`, m => console.log('수신:', m.body));
+  },
+});
+client.activate();
+```
+
+```bash
+node check.mjs &
+# 다른 터미널에서 메시지 publish하면 "수신: {...}" 가 출력됨
+```
+
+### Step 5 — 정리
+```bash
+docker compose down
+```
+
+### (선택) 스키마/데이터 초기화 (재실행 시)
 ```bash
 docker exec chat-postgres psql -U chat -d chat -c \
   "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO chat;"
 ```
-
----
-
-## 동작 검증
-
-### REST 시나리오 (curl)
-```bash
-BASE=http://localhost:8080
-
-# 세션 생성
-SID=$(curl -sf -X POST $BASE/sessions | jq -r .id)
-
-# 참여
-curl -sf -X POST $BASE/sessions/$SID/join -H 'content-type: application/json' -d '{"userId":"alice"}'
-curl -sf -X POST $BASE/sessions/$SID/join -H 'content-type: application/json' -d '{"userId":"bob"}'
-
-# 메시지 보내기 (멱등 키 cli-1)
-curl -sf -X POST $BASE/sessions/$SID/events -H 'content-type: application/json' -d '
-{"clientEventId":"cli-1","type":"MESSAGE","actorUserId":"alice","payload":{"messageId":"m1","text":"안녕"}}'
-
-# 같은 cli-1 재전송 → wasInserted=false, 같은 serverSeq 반환
-curl -sf -X POST $BASE/sessions/$SID/events -H 'content-type: application/json' -d '
-{"clientEventId":"cli-1","type":"MESSAGE","actorUserId":"alice","payload":{"messageId":"m1","text":"안녕"}}'
-
-# 현재 시점 상태 복원
-curl -sf "$BASE/sessions/$SID/timeline"
-
-# 특정 시점 복원
-curl -sf "$BASE/sessions/$SID/timeline?at=2026-05-20T02:30:00Z"
-
-# 이벤트 로그 (디버깅)
-curl -sf "$BASE/sessions/$SID/events?from=0&limit=100"
-```
-
-### WebSocket(STOMP) 시나리오
-```bash
-cd /tmp && mkdir -p ws-check && cd ws-check
-npm init -y && npm install @stomp/stompjs ws sockjs-client
-# 이후 docs/event-sourcing.md의 검증 절차 또는 첨부 check.mjs 사용
-```
-- 구독: `/topic/sessions/{sessionId}`
-- 발행: `/app/sessions/{sessionId}/events` (본문은 REST의 AppendEventRequest와 동일)
-
-자동화된 E2E 검증 스크립트 예시는 [`/tmp/ws-check/check.mjs`](#) 참조.
 
 ---
 
@@ -126,7 +217,7 @@ npm init -y && npm install @stomp/stompjs ws sockjs-client
 demo/
 ├── README.md                      ← 이 파일
 ├── openapi.yaml                   ← API 명세 (OpenAPI 3.1)
-├── docker-compose.yml             ← Postgres + Redis
+├── docker-compose.yml             ← Postgres
 ├── build.gradle.kts               ← 의존성 + Boot 4 모듈 분리 이슈 주석
 ├── docs/
 │   ├── db.md                      ← ERD + DDL 설계 근거 + 인덱스 트레이드오프
@@ -190,29 +281,6 @@ infra ───────────┘                                      
 
 ---
 
-## 평가 항목 ↔ 결과물 매핑
-
-| 평가 항목 | 위치 |
-|---|---|
-| 실시간 메시지 송수신 | `api/ws/ChatStompController.kt`, `api/ws/ChatBroadcaster.kt` |
-| join/leave + presence | `domain/session/SessionService.kt`, `infra/persistence/ParticipantRepository.kt` |
-| 이벤트 수집 API | `api/rest/EventController.kt` (POST/GET) |
-| 중복 이벤트 방지 | `infra/persistence/EventRepository.kt` (ON CONFLICT), `domain/event/EventService.kt` (wasInserted 분기) |
-| 순서 뒤바뀜 처리 | `server_seq` 기반 정렬 (모든 리플레이/조회) |
-| 시점 상태 복원 | `domain/timeline/TimelineService.kt` + `GET /sessions/{id}/timeline?at=` |
-| Snapshot 자동 생성 | `domain/snapshot/SnapshotService.kt`, `SnapshotTrigger.kt` (@Async + AFTER_COMMIT) |
-| DB 설계 (ERD/DDL/인덱스 근거) | [docs/db.md](docs/db.md) + `src/main/resources/db/migration/V1__init.sql` |
-| REST API 스펙 | [openapi.yaml](openapi.yaml) |
-| 쿼리 최적화 / 병목 분석 | [docs/queries.md](docs/queries.md) |
-| 재연결 정합성 | [docs/design.md](docs/design.md) §1 + [docs/event-sourcing.md](docs/event-sourcing.md) |
-| 수평 확장 전략 | [docs/design.md](docs/design.md) §2 |
-| 관측 가능성 설계 | [docs/design.md](docs/design.md) §3 |
-| 비동기 처리 (Outbox/DLQ/Idempotency) | [docs/design.md](docs/design.md) §4 |
-| 장애 시나리오 3종 | [docs/design.md](docs/design.md) §5 |
-| 이벤트 기반 상태 복원 설계 | [docs/event-sourcing.md](docs/event-sourcing.md) |
-
----
-
 ## 가정 (Assumptions)
 
 - **인증/인가**: REST 본문/STOMP 메시지의 `userId`를 신뢰. 실 운영에선 JWT 등으로 검증.
@@ -223,20 +291,6 @@ infra ───────────┘                                      
 
 ---
 
-## 알려진 동작 / 부채
+## 알려진 동작
 
-- **`BIGSERIAL` 결번**: `INSERT … ON CONFLICT DO NOTHING` 시에도 sequence가 consume되어 `server_seq`에 빈 번호가 생길 수 있음 (Postgres 정상 동작). 단조 증가는 유지되므로 순서 판정엔 영향 없음.
-- **Snapshot 자동 생성 미구현**: 인프라/스키마(`snapshots` 테이블 + 인덱스)는 준비됨. 워커 구현은 가산점 영역. [docs/event-sourcing.md](docs/event-sourcing.md) "Snapshot + 델타" 참조.
-- **Projection 비동기 파이프라인 미구현**: 현재는 동기. 분리 설계는 [docs/design.md §4](docs/design.md) "Outbox 패턴" 참조.
-- **다중 인스턴스 broadcast**: 현재 SimpleBroker(in-memory). Redis/Rabbit relay로 교체 설계만.
-- **부하 테스트 결과 없음**: 인덱스/풀 사이즈는 합리적 기본값. 실측 후 조정 예정.
-
----
-
-## 추가 구현 항목 (가산점)
-
-- ✅ **Snapshot 자동 생성** (`SnapshotService` + `SnapshotTrigger` @Async). interval은 `chat.snapshot.interval-events` (기본 50).
-- ✅ **Projection 비동기 분리** — Broadcast는 `@TransactionalEventListener(AFTER_COMMIT)`로 트랜잭션 외 처리.
-- ✅ **헥사고날 청사진 + 부분 적용 전략** — [docs/architecture.md](docs/architecture.md)
-- ✅ **Testcontainers 통합 테스트** — `./gradlew test` 한 번에 Postgres 자동 기동 + 11개 시나리오 검증.
-- (예정) k6 부하 테스트 시나리오
+- **`BIGSERIAL` 결번**: ON CONFLICT DO NOTHING 시에도 sequence가 consume됨 (Postgres 정상 동작). 단조성은 유지되므로 순서 판정엔 영향 없음.
