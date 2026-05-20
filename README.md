@@ -53,7 +53,7 @@ docker만 실행 중이면 `docker compose up`도 필요 없음.
 | `DemoApplicationTests` | 컨텍스트 로드 | 1 |
 | **합계** | | **11** |
 
-### 4. (선택) 스키마/데이터 초기화
+### 5. (선택) 스키마/데이터 초기화
 ```bash
 docker exec chat-postgres psql -U chat -d chat -c \
   "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO chat;"
