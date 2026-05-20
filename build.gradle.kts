@@ -69,6 +69,24 @@ kotlin {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // 매 테스트마다 PASSED/FAILED/SKIPPED 출력 + 끝에 요약(전체/통과/실패/스킵).
+    testLogging {
+        events(
+            org.gradle.api.tasks.testing.logging.TestLogEvent.PASSED,
+            org.gradle.api.tasks.testing.logging.TestLogEvent.FAILED,
+            org.gradle.api.tasks.testing.logging.TestLogEvent.SKIPPED,
+        )
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStandardStreams = false
+    }
+    afterSuite(KotlinClosure2<TestDescriptor, TestResult, Unit>({ desc, result ->
+        if (desc.parent == null) {  // 루트 suite 한 번만
+            println("\n>>> Test Summary: ${result.testCount} tests, " +
+                "${result.successfulTestCount} passed, " +
+                "${result.failedTestCount} failed, " +
+                "${result.skippedTestCount} skipped")
+        }
+    }))
 }
 
 // 루트의 openapi.yaml을 SoT로 두고 빌드 시 static/으로 복사 → Swagger UI가 /openapi.yaml로 접근.
