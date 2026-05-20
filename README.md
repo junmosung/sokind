@@ -3,6 +3,22 @@
 1:1 실시간 채팅 서비스 + 이벤트 소싱 기반 시점 복원.
 Spring Boot 4 (Kotlin, JDK 24) + PostgreSQL 16 + jOOQ + STOMP over WebSocket.
 
+> **📋 평가자용 한눈에 보기**: [**docs/submission-checklist.md**](docs/submission-checklist.md) — 과제 §6 제출물 체크리스트 항목별 위치/검증 매핑 (필수 6/6 + 가산점 4).
+
+## 제출물 체크리스트 (한눈에)
+
+| # | 항목 | 위치 |
+|---|---|---|
+| 1 | README — 실행/환경/의사결정 | 이 파일 |
+| 2 | API 명세 (OpenAPI) | [`openapi.yaml`](openapi.yaml) + Swagger UI `/swagger.html` |
+| 3 | ERD + 핵심 DDL | [`docs/db.md`](docs/db.md) + [`V1__init.sql`](src/main/resources/db/migration/V1__init.sql) |
+| 4 | 주요 쿼리 + 인덱스 + 병목 | [`docs/queries.md`](docs/queries.md) — 핫패스 3개 |
+| 5 | 설계 (재연결/중복/확장/관측/장애) | [`docs/design.md`](docs/design.md) + [`docs/event-sourcing.md`](docs/event-sourcing.md) |
+| 6 | 이벤트 기반 상태 복원 | [`docs/event-sourcing.md`](docs/event-sourcing.md) + [`TimelineService.kt`](src/main/kotlin/me/victor/demo/domain/timeline/TimelineService.kt) |
+| + | 가산점 4종 (Snapshot 자동화/비동기 Projection/헥사고날 청사진/Testcontainers 11/11) | [`docs/submission-checklist.md`](docs/submission-checklist.md#가산점-항목-4-추가-구현) |
+
+자세한 점검 결과 + 검증 방법은 [**docs/submission-checklist.md**](docs/submission-checklist.md).
+
 ## 한 줄 설계 요약
 **모든 도메인 변경을 `events` 테이블에 append-only로 기록 → 어느 시점이든 그 로그만으로 상태 재구축이 가능하다.**
 
